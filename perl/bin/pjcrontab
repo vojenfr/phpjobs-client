@@ -1,0 +1,142 @@
+#!/usr/bin/perl -w
+use strict;
+use Getopt::Long qw(:config gnu_getopt);
+use PHPJobs::Crontab::Client;
+use PHPJobs::Secret::Read;
+
+
+my $target;
+my $secret;
+my $list_cron = 0;
+my $edit_cron = 0;
+
+# Parse command-line options, taking --batch and --debug directly into account
+my $cmdline_conf_file_path;
+my $cmdline_secure;
+my $cmdline_read_secret_from;
+exit(1) unless GetOptions(
+	'secure!' => \$cmdline_secure,
+	'read-secret-from=s' => \$cmdline_read_secret_from,
+	'l|list' => \$list_cron,
+	'e|edit' => \$edit_cron,
+);
+
+# there must remain at least one argument: the target
+&usage() unless (@ARGV);
+$target = shift;
+
+# Get default configuration (hardcoded default options + configuration file)
+my $system_config = PHPJobs::System::Config->new($cmdline_conf_file_path);
+my $client_config = $system_config->getConfigurationForTarget($target);
+
+$client_config->{'secure'} = $cmdline_secure if (defined($cmdline_secure));
+$client_config->{'read_secret_from'} = $cmdline_read_secret_from if (defined($cmdline_read_secret_from));
+
+# Read secret if needed
+if ($client_config->{'secure'}) {
+	$secret = read_secret($target, $client_config->{'read_secret_from'});
+}
+
+# Initialize our PHPJobs client object
+my $my_client = new PHPJobs::Crontab::Client(
+	'jobs_remote_url' => $client_config->{'target_url'},
+	'secure' => $client_config->{'secure'},
+	'secret' => $secret
+);
+
+if( $list_cron ) {  
+	print GET();
+}
+elsif ( $edit_cron ) {
+	my $crontabfile = '.cr0nt@b.TMP';
+	my $crontabcontent = GET();
+	save_file($crontabfile,$crontabcontent);
+	system "vim $crontabfile";
+	$crontabcontent = load_file($crontabfile);
+	SET($crontabcontent);
+	unlink $crontabfile;
+	print GET();
+}
+
+sub GET {
+    my $new_job = $my_client->newJob('crontab', undef, {}, {'process' => 'GET'});
+	$new_job->run();
+	$new_job->pollUntilStatus();
+	#sleep 0.1;
+	#print Dumper($new_job->name(),$new_job->type(),$new_job->status(),$new_job->output('out'),$new_job->output('err'));
+	my $job_stdout = ($new_job->output('out'));
+	return $job_stdout;
+}
+
+sub SET {
+	my ($crontabcontent) = @_;
+	my $new_job = $my_client->newJob('crontab', undef, {}, {'process' => 'SET','crontab' => $crontabcontent});
+	$new_job->run();
+	$new_job->pollUntilStatus();
+	print $new_job->output('out');
+}
+
+sub save_file {
+	my ($file,$content) = @_;
+	open(my $fh, '>', $file) or die $!;
+	print $fh $content;
+	close($fh);
+}
+
+sub load_file {
+	my ($file) = @_;
+	my $content;
+	open(my $fh, '<', $file) or die "Cannot open the file : $file";
+		{
+				local $/;
+				$content = <$fh>;
+		}
+		close($fh);
+		return $content;
+}
+
+sub usage {
+	printf('Usage: %s list(-l)/edit(-e) URL|host'  . "\n", $0);
+	exit(shift || 0);
+}
+
+sub read_secret {
+	my $target = shift;
+	my $read_secret_from = shift;
+	
+	my $secret = '';
+	if ($read_secret_from eq '-') {
+		$secret = read_secret_from_keyboard($target);
+	}
+	else {
+		$secret = read_secret_from_file($target, $read_secret_from);
+		if (!length($secret)) {
+			$secret = read_secret_from_keyboard($target);
+		}
+	}
+	
+	if (!length($secret)) {
+		die 'Got empty secret, aborting';
+	}
+	return $secret;
+}
+
+sub read_secret_from_file {
+	my $target = shift;
+	my $read_secret_from = shift;
+	
+	my $secret;
+	my $secret_fh;
+	if (!open($secret_fh, '<', $read_secret_from)) {
+		warn sprintf('Unable to read secret file %s: %s', $read_secret_from, $!);
+	}
+	else {
+		$secret = <$secret_fh>;
+		close($secret_fh);
+		chomp($secret);
+		if (!length($secret)) {
+			warn sprintf('got empty secret for target %s', $target);
+		}
+	}
+	return $secret;
+}
